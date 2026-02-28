@@ -23,6 +23,11 @@ ISO_HASHES=(
 	"7ae95242aa23d5e31b353811e1e920a4377fa53cf728b8edcb17006b7f3c4e97"
 )
 
+LOCAL_ISO_HASHES=(
+	"43e9182ae20bcbc0f6f4588fee6c1b336c261f1465403118a1973b09b1a22541"
+	"7ae95242aa23d5e31b353811e1e920a4377fa53cf728b8edcb17006b7f3c4e97"
+)
+
 TMP_ISO="/var/tmp/${GAME_NAME}_download.iso"
 TMP_PARTIAL="${TMP_ISO}.partial"
 MOUNT_POINT="/var/tmp/${GAME_NAME}Installer"
@@ -118,14 +123,55 @@ fi
 
 echo "Thank you. Continuing..."
 
-# step 1: download the game iso
-printf "${GREEN}>>> Downloading game${RESET}\n"
-if download_game
-then
-	echo "ISO downloaded"
+# step 1: ask whether to use a local iso or download
+echo ""
+read -r -p "Do you have a locally downloaded ISO image? (yes/no): " has_local
+
+if [[ "$has_local" == "yes" ]]; then
+	echo "Enter or drag-and-drop the path to the ISO file:"
+	read -r -p "> " LOCAL_ISO
+
+	# Strip quotes that drag-and-drop may add
+	LOCAL_ISO="${LOCAL_ISO%\'}"
+	LOCAL_ISO="${LOCAL_ISO#\'}"
+	LOCAL_ISO="${LOCAL_ISO%\"}"
+	LOCAL_ISO="${LOCAL_ISO#\"}"
+
+	printf "${GREEN}>>> Using local ISO: ${LOCAL_ISO}${RESET}\n"
+
+	if [ ! -f "$LOCAL_ISO" ]; then
+		printf "${RED}File not found: ${LOCAL_ISO}${RESET}\n"
+		exit 1
+	fi
+
+	printf "${GREEN}>>> Verifying hash...${RESET}\n"
+	actual_hash="$(compute_sha256 "$LOCAL_ISO")"
+	echo "SHA-256: $actual_hash"
+
+	hash_ok=false
+	for expected_hash in "${LOCAL_ISO_HASHES[@]}"; do
+		if [ "$actual_hash" = "$expected_hash" ]; then
+			hash_ok=true
+			break
+		fi
+	done
+
+	if [ "$hash_ok" = false ]; then
+		printf "${RED}Hash mismatch. The local ISO does not match any known hash.${RESET}\n"
+		exit 1
+	fi
+
+	echo "Hash OK"
+	TMP_ISO="$LOCAL_ISO"
 else
-	printf "${RED}Download failed${RESET}\n"
-	exit 1
+	printf "${GREEN}>>> Downloading game${RESET}\n"
+	if download_game
+	then
+		echo "ISO downloaded"
+	else
+		printf "${RED}Download failed${RESET}\n"
+		exit 1
+	fi
 fi
 
 # step 2: mount the game iso
