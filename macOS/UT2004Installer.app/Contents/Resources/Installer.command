@@ -32,8 +32,33 @@ TMP_ISO="/var/tmp/${GAME_NAME}_download.iso"
 TMP_PARTIAL="${TMP_ISO}.partial"
 MOUNT_POINT="/var/tmp/${GAME_NAME}Installer"
 
+# Known files that should be present on a mounted UT2004 disc
+DISC_SIGNATURE_FILES=(
+	"data1.cab"
+	"data1.hdr"
+)
+
 compute_sha256() {
 	/usr/bin/shasum -a 256 "$1" | awk '{print $1}'
+}
+
+# Check /Volumes for an already-mounted UT2004 disc/ISO
+find_mounted_iso() {
+	for vol in /Volumes/*/; do
+		[ -d "$vol" ] || continue
+		local found=true
+		for sig_file in "${DISC_SIGNATURE_FILES[@]}"; do
+			if ! find "$vol" -maxdepth 1 -iname "$sig_file" -print -quit 2>/dev/null | grep -q .; then
+				found=false
+				break
+			fi
+		done
+		if [ "$found" = true ]; then
+			echo "${vol%/}"
+			return 0
+		fi
+	done
+	return 1
 }
 
 download_game() {
@@ -123,70 +148,84 @@ fi
 
 echo "Thank you. Continuing..."
 
-# step 1: ask whether to use a local iso or download
-echo ""
-read -r -p "Do you have a locally downloaded ISO image? (yes/no): " has_local
+# step 1: check for already-mounted disc, ask for local ISO, or download
+ISO_ALREADY_MOUNTED=false
 
-if [[ "$has_local" == "yes" ]]; then
-	echo "Enter or drag-and-drop the path to the ISO file:"
-	read -r -p "> " LOCAL_ISO
-
-	# Strip quotes that drag-and-drop may add
-	LOCAL_ISO="${LOCAL_ISO%\'}"
-	LOCAL_ISO="${LOCAL_ISO#\'}"
-	LOCAL_ISO="${LOCAL_ISO%\"}"
-	LOCAL_ISO="${LOCAL_ISO#\"}"
-
-	printf "${GREEN}>>> Using local ISO: ${LOCAL_ISO}${RESET}\n"
-
-	if [ ! -f "$LOCAL_ISO" ]; then
-		printf "${RED}File not found: ${LOCAL_ISO}${RESET}\n"
-		exit 1
+printf "${GREEN}>>> Checking for a mounted UT2004 disc...${RESET}\n"
+if DETECTED_VOLUME="$(find_mounted_iso)"; then
+	printf "${GREEN}Found mounted disc at: ${DETECTED_VOLUME}${RESET}\n"
+	read -r -p "Use this mounted disc? (yes/no): " use_mounted
+	if [[ "$use_mounted" == "yes" ]]; then
+		MOUNT_POINT="$DETECTED_VOLUME"
+		ISO_ALREADY_MOUNTED=true
 	fi
+fi
 
-	printf "${GREEN}>>> Verifying hash...${RESET}\n"
-	actual_hash="$(compute_sha256 "$LOCAL_ISO")"
-	echo "SHA-256: $actual_hash"
+if [ "$ISO_ALREADY_MOUNTED" = false ]; then
+	echo ""
+	read -r -p "Do you have a locally downloaded ISO image? (yes/no): " has_local
 
-	hash_ok=false
-	for expected_hash in "${LOCAL_ISO_HASHES[@]}"; do
-		if [ "$actual_hash" = "$expected_hash" ]; then
-			hash_ok=true
-			break
+	if [[ "$has_local" == "yes" ]]; then
+		echo "Enter or drag-and-drop the path to the ISO file:"
+		read -r -p "> " LOCAL_ISO
+
+		# Strip quotes that drag-and-drop may add
+		LOCAL_ISO="${LOCAL_ISO%\'}"
+		LOCAL_ISO="${LOCAL_ISO#\'}"
+		LOCAL_ISO="${LOCAL_ISO%\"}"
+		LOCAL_ISO="${LOCAL_ISO#\"}"
+
+		printf "${GREEN}>>> Using local ISO: ${LOCAL_ISO}${RESET}\n"
+
+		if [ ! -f "$LOCAL_ISO" ]; then
+			printf "${RED}File not found: ${LOCAL_ISO}${RESET}\n"
+			exit 1
 		fi
-	done
 
-	if [ "$hash_ok" = false ]; then
-		printf "${RED}Hash mismatch. The local ISO does not match any known hash.${RESET}\n"
-		exit 1
-	fi
+		printf "${GREEN}>>> Verifying hash...${RESET}\n"
+		actual_hash="$(compute_sha256 "$LOCAL_ISO")"
+		echo "SHA-256: $actual_hash"
 
-	echo "Hash OK"
-	TMP_ISO="$LOCAL_ISO"
-else
-	printf "${GREEN}>>> Downloading game${RESET}\n"
-	if download_game
-	then
-		echo "ISO downloaded"
+		hash_ok=false
+		for expected_hash in "${LOCAL_ISO_HASHES[@]}"; do
+			if [ "$actual_hash" = "$expected_hash" ]; then
+				hash_ok=true
+				break
+			fi
+		done
+
+		if [ "$hash_ok" = false ]; then
+			printf "${RED}Hash mismatch. The local ISO does not match any known hash.${RESET}\n"
+			exit 1
+		fi
+
+		echo "Hash OK"
+		TMP_ISO="$LOCAL_ISO"
 	else
-		printf "${RED}Download failed${RESET}\n"
+		printf "${GREEN}>>> Downloading game${RESET}\n"
+		if download_game
+		then
+			echo "ISO downloaded"
+		else
+			printf "${RED}Download failed${RESET}\n"
+			exit 1
+		fi
+	fi
+
+	# step 2: mount the game iso
+	printf "${GREEN}>>> Mounting game image: ${TMP_ISO} => ${MOUNT_POINT}${RESET}\n"
+	# create a unique mount point name
+	if [ -d "$MOUNT_POINT" ]; then
+		MOUNT_POINT="${MOUNT_POINT}_$$"
+	fi
+	mkdir -p "$MOUNT_POINT"
+	if /usr/bin/hdiutil attach "$TMP_ISO" -mountpoint "$MOUNT_POINT" -nobrowse -noverify -noautoopen
+	then
+		echo "ISO mounted"
+	else
+		printf "${RED}Mounting failed${RESET}\n"
 		exit 1
 	fi
-fi
-
-# step 2: mount the game iso
-printf "${GREEN}>>> Mounting game image: ${TMP_ISO} => ${MOUNT_POINT}${RESET}\n"
-# create a unique mount point name
-if [ -d "$MOUNT_POINT" ]; then
-	MOUNT_POINT="${MOUNT_POINT}_$$"
-fi
-mkdir -p "$MOUNT_POINT"
-if /usr/bin/hdiutil attach "$TMP_ISO" -mountpoint "$MOUNT_POINT" -nobrowse -noverify -noautoopen
-then
-	echo "ISO mounted"
-else
-	printf "${RED}Mounting failed${RESET}\n"
-	exit 1
 fi
 
 # step 3: move all cab and hdr files into the application support dir
@@ -201,7 +240,9 @@ done
 # step 4: use the embedded unshield to extract the cab files
 printf "${GREEN}>>> Extracting game files${RESET}\n"
 cd "$USER_SUPPORT_DIR/$GAME_NAME.tmp"
-/usr/bin/hdiutil detach "$MOUNT_POINT"
+if [ "$ISO_ALREADY_MOUNTED" = false ]; then
+	/usr/bin/hdiutil detach "$MOUNT_POINT"
+fi
 if $APP_DIR/MacOS/unshield x *.hdr
 then
 	echo "Extraction succeeded"
